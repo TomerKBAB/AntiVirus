@@ -1,6 +1,16 @@
+/****************************
+ *        Includes
+ ****************************/
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
+#include <string.h>
+
+#define BUFFER_SIZE 10000
+
+/****************************
+ *       Structs 
+ ****************************/
 
 typedef struct virus {
     unsigned short SigSize;
@@ -20,35 +30,99 @@ typedef enum {
     BIG = 1
 } Endian;
 
-link *lastNode = NULL;  
+/****************************
+ *          Globals 
+ ****************************/
 
+link *lastNode = NULL;  
+link* globalVirusList = NULL;
+
+/****************************
+ *     Function Prototypes
+ ****************************/
+
+ // Virus loading
+Virus* readVirus(FILE* file, Endian endian);
+link* parseVirusFile(FILE *file);
+
+// Virus detection
+void printVirus(Virus* virus, FILE* file);
+void detect_virus(char *buffer, unsigned int size, link *virus_list);
+
+// Linked list
+void list_print(link *virus_list, FILE *file);
+void list_free(link *virus_list);
+link* list_append(link* virus_list, Virus* data);
+
+
+// Utilities
 bool checkMagic(FILE *file, Endian *endian);
 unsigned short parseSigLength(FILE *file, Endian endian);
 unsigned char* parseStringFromFile(FILE *file, int count);
-link* list_append(link* virus_list, Virus* data);
 void PrintHex(FILE *file, unsigned char buffer[], size_t length);
-void list_print(link *virus_list, FILE *file);
-FILE* openFile(char *name);
-link* parseVirusFile(FILE *file);
-void list_free(link *virus_list);
-void printVirus(Virus* virus, FILE* file);
-Virus* readVirus(FILE* file, Endian endian);
+void readLine(char* buffer, int size);
+
+// Menu functions
+void loadSignatures();
+void detectVirus();
+void listPrint();
+void quit();
+
+/****************************
+ *     Menu Setup
+ ****************************/
+
+struct fun_desc{
+  char *name;
+  void (*fun)();
+};
+
+struct fun_desc menu[] = {
+  {"Load signatures", loadSignatures},
+  {"Print signatures", listPrint},
+  {"Detect viruses", detectVirus},
+//   {"Fix file", fixFile},
+  {"Quit", quit},
+  {NULL, NULL}
+};
 
 int main(int argc, char **argv) {
-    if (argc < 2) {
-        perror("Virus input file required!");
-        return 1;
+    int menu_size = 0;
+    while (menu[menu_size].name != NULL) {
+        menu_size++;
     }
-    FILE *file = openFile(argv[1]);
+    char buf[12];
+    while (1) {
+        printf("\nselect operation from the following menu: \n");
 
-    link *virusList = parseVirusFile(file);
+        for (int i = 1; i < menu_size + 1; i++) {
+            printf("%d. %s\n",i ,menu[i - 1].name);
+        }
 
-    list_print(virusList, stdout);
+        if (fgets(buf, 12, stdin) == NULL) {
+            printf("recieved EOF, exists\n");
+            quit();
+        }
+        int pos = atoi(buf);
+        if ((pos <= 0) || (pos > menu_size)) {
+            printf("not within bounds, exists\n");
+            quit();
+        }
+        menu[pos - 1].fun();
+    }
+}
 
-    list_free(virusList);
-    
-    fclose(file);
+void loadSignatures() {
+    printf("Please enter file signatures name:\n");
+    char filename[100];
+    readLine(filename, sizeof(filename));
+    FILE *file = fopen(filename, "rb");
+    if (file == NULL) {
+        perror("Error opening file");
+        return;
+    }
 
+    globalVirusList =  parseVirusFile(file);
 }
 
 void PrintHex(FILE *file, unsigned char buffer[], size_t length) { 
@@ -57,25 +131,22 @@ void PrintHex(FILE *file, unsigned char buffer[], size_t length) {
     }
 }
 
-FILE* openFile(char *name) {
-    FILE *file = fopen(name, "rb");
-    if (file == NULL) {
-        perror("Error opening file");
-        exit(1);
-    }
-    return file;
-}
-
+/**
+ * Opens and parses a virus signature file.
+ * Returns a linked list of virus signatures.
+ */
 link* parseVirusFile(FILE *file) {
     Endian endian;
     if (!checkMagic(file, &endian)) {
-        perror("File magic list_append is not correct");
-        exit(1);
+        fprintf(stderr, "File magic is not correct!\n");
+        return NULL;
     }
     link *virusList = NULL;
     while (!feof(file)) {
         Virus* virus = readVirus(file, endian);
-        virusList = list_append(virusList, virus);
+        if(virus != NULL) {
+            virusList = list_append(virusList, virus);
+        }
     }
     return virusList;
 }
@@ -89,9 +160,17 @@ bool checkMagic(FILE *file, Endian *endian) {
     return true;
 }
 
+/**
+ * Reads a virus from the binary file, including size, name, and signature.
+ * Returns a pointer to a Virus struct.
+ */
 Virus* readVirus(FILE* file, Endian endian) {
     Virus* virus = (Virus *) malloc(sizeof(Virus));
     virus->SigSize = parseSigLength(file, endian);
+    if(virus->SigSize == 0) {
+        free(virus);
+        return NULL;
+    }
     virus->VirusName = parseStringFromFile(file, 16);
     virus->Sig = parseStringFromFile(file, (int)virus->SigSize);
     return virus;
@@ -100,10 +179,16 @@ Virus* readVirus(FILE* file, Endian endian) {
 unsigned short parseSigLength(FILE *file, Endian endian) {
     unsigned short sigLength = 0;
     if (endian == LITTLE) {
-        fread(&sigLength, 2, 1, file);  // Little-endian: LSB first
-    } else {
+        // Checks for not reading empty data
+        if (fread(&sigLength, 2, 1, file) != 1) { // Little-endian: LSB first
+            return 0;
+        }
+    }
+    else {
         unsigned char bytes[2];
-        fread(bytes, 1, 2, file);  // Big-endian: MSB first
+        if (fread(bytes, 1, 2, file) != 2) { // Big-endian: MSB first
+            return 0;
+        }
         sigLength = (bytes[0] << 8) | bytes[1];
     }
     return sigLength;
@@ -133,9 +218,13 @@ link* list_append(link* virus_list, Virus* data) {
     return virus_list;
 }
 
-void list_print(link *virus_list, FILE *file) {
-    if (virus_list == NULL)
+void listPrint() {
+    if (globalVirusList == NULL)
         return;
+    list_print(globalVirusList, stdout);
+}
+
+void list_print(link *virus_list, FILE *file) {
     link* current = virus_list;
     while (current != NULL && current->vir != NULL) {
         Virus *curr = current->vir;
@@ -163,4 +252,60 @@ void list_free(link *virus_list) {
         free(temp->vir);
         free(temp);
     }
+}
+
+/**
+ * Scans a memory buffer for known virus signatures.
+ * If found, prints their starting location and metadata.
+ */
+void detectVirus() {
+    if(globalVirusList == NULL) {
+        fprintf(stderr, "You need to provide signature virus file first\n");
+        return;
+    }
+    printf("Please enter file name to scan:\n");
+    char filename[100];
+    readLine(filename, sizeof(filename));
+
+    FILE *file = fopen(filename, "rb");
+    if (file == NULL) {
+        perror("Error opening file");
+        return;
+    }
+
+    char* buffer = malloc(BUFFER_SIZE);
+
+    size_t bytesRead = fread(buffer, 1, BUFFER_SIZE, file);
+    fclose(file);
+
+    detect_virus(buffer, (unsigned int) bytesRead, globalVirusList);
+
+    free(buffer);
+}
+
+void detect_virus(char *buffer, unsigned int size, link *virus_list) {
+    link* tmp_virus_list = virus_list;
+    for (int i = 0; i < size; i++) {
+        tmp_virus_list = virus_list;
+        while (tmp_virus_list != NULL) {
+            Virus* virus = tmp_virus_list->vir;
+            if (virus != NULL && memcmp(&buffer[i], virus->Sig, virus->SigSize) == 0) {
+                printf("Starting byte: %d\n", i);
+                printf("Virus name: %s\n", virus->VirusName);
+                printf("Signature size: %hu\n", virus->SigSize);
+            }
+            tmp_virus_list = tmp_virus_list->nextVirus;
+        } 
+    }
+}
+
+void readLine(char* buffer, int size) {
+    fgets(buffer, size, stdin);
+    buffer[strcspn(buffer, "\n")] = '\0';
+}
+
+void quit() {
+    if(globalVirusList != NULL)
+        list_free(globalVirusList);
+    exit(0);
 }
