@@ -321,8 +321,6 @@ void detectVirus() {
     perror("Memory allocation failed\n");
     return;
   }
-  if (buffer) {
-  }
   printf("Please enter file name to scan:\n");
   char filename[100];
   readLine(filename, sizeof(filename));
