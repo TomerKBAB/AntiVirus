@@ -1,3 +1,9 @@
+/**
+ *    Authors:
+ *   Tomer Roemy
+ *   Yuval Arbel
+ */
+ 
 /****************************
  *        Includes
  ****************************/
@@ -18,19 +24,17 @@ typedef struct virus {
   unsigned char *Sig;
 } Virus;
 
-typedef struct link link;
 
 typedef struct link {
-  Virus *vir;
-  link *nextVirus;
+  void *data;
+  struct link * next;
+  void (*freeData)(void * data);
 } link;
 
-typedef struct Detection Detection;
 
 typedef struct Detection {
   int offset;
   Virus *virus;
-  Detection *nextDetection;
 } Detection;
 
 typedef enum { LITTLE = 0, BIG = 1 } Endian;
@@ -41,6 +45,7 @@ typedef enum { LITTLE = 0, BIG = 1 } Endian;
 
 link *lastNode = NULL;
 link *globalVirusList = NULL;
+char *infectedFile = NULL;
 
 /****************************
  *     Function Prototypes
@@ -53,15 +58,16 @@ link *parseVirusFile(FILE *file);
 // Virus detection
 void printVirus(Virus *virus, FILE *file);
 void detect_virus(char *buffer, unsigned int size, link *virus_list);
-Detection *scan_for_viruses(char *buffer, unsigned int size, link *virus_list,
+link *scan_for_viruses(char *buffer, unsigned int size, link *virus_list,
                             int *numDetections);
 // Virus removal
 void neutralize_virus(char *fileName, int signatureOffset);
+void free_virus_data(void * data);
 
 // Linked list
 void list_print(link *virus_list, FILE *file);
-void list_free(link *virus_list);
-link *list_append(link *virus_list, Virus *data);
+link *list_append(link *list, void *data, void (*freeData)());
+void list_free(link *list_ptr);
 
 // Utilities
 bool checkMagic(FILE *file, Endian *endian);
@@ -70,7 +76,7 @@ unsigned char *parseStringFromFile(FILE *file, int count);
 void PrintHex(FILE *file, unsigned char buffer[], size_t length);
 void readLine(char *buffer, int size);
 size_t readFromFile(char *filename, char *buffer);
-void freeDetections(Detection *detections);
+
 
 // Menu functions
 void loadSignatures();
@@ -96,6 +102,11 @@ struct fun_desc menu[] = {{"Load signatures", loadSignatures},
                           {NULL, NULL}};
 
 int main(int argc, char **argv) {
+  if (argc < 2) {
+    fprintf(stderr, "Infected file should be provided as an argument \n");
+    exit(1);
+  }
+  infectedFile = argv[1];
   int menu_size = 0;
   while (menu[menu_size].name != NULL) {
     menu_size++;
@@ -168,7 +179,7 @@ link *parseVirusFile(FILE *file) {
   while (!feof(file)) {
     Virus *virus = readVirus(file, endian);
     if (virus != NULL) {
-      virusList = list_append(virusList, virus);
+      virusList = list_append(virusList, virus, free_virus_data);
     }
   }
   return virusList;
@@ -250,25 +261,29 @@ unsigned char *parseStringFromFile(FILE *file, int count) {
  * node named data. Returns pointer to the head of the newly
  * created list.
  */
-link *list_append(link *virus_list, Virus *data) {
+link *list_append(link *list, void *data, void (*freeData)()) {
   link *newLink = (link *)malloc(sizeof(link));
   if (!newLink) {
     perror("Memory allocation failed\n");
     return NULL;
   }
 
-  newLink->vir = data;
-  newLink->nextVirus = NULL;
+  newLink->data = data;
+  newLink->next = NULL;
+  
+  // Inserts free function ptr for data.
+  if(newLink->data){
+    newLink->freeData = freeData;
+  }
 
-  if (virus_list == NULL) {
-    virus_list = newLink;
+  if (list == NULL) {
+    list = newLink;
     lastNode = newLink;
-    return newLink;
   } else {
-    lastNode->nextVirus = newLink;
+    lastNode->next = newLink;
     lastNode = newLink;
   }
-  return virus_list;
+  return list;
 }
 
 /**
@@ -276,17 +291,19 @@ link *list_append(link *virus_list, Virus *data) {
  * Prints all loaded viruses to stdout.
  */
 void listPrint() {
-  if (globalVirusList == NULL)
+  if (globalVirusList == NULL) {
+    fprintf(stderr, "You need to provide signature virus file first\n");
     return;
+  }
   list_print(globalVirusList, stdout);
 }
 
 void list_print(link *virus_list, FILE *file) {
   link *current = virus_list;
-  while (current != NULL && current->vir != NULL) {
-    Virus *curr = current->vir;
+  while (current != NULL && current->data != NULL) {
+    Virus *curr = (Virus *)current->data;
     printVirus(curr, file);
-    current = current->nextVirus;
+    current = current->next;
   }
 }
 
@@ -298,37 +315,51 @@ void printVirus(Virus *virus, FILE *file) {
   fprintf(file, "\n\n");
 }
 
-void list_free(link *virus_list) {
-  while (virus_list != NULL) {
-    link *temp = virus_list;
-    virus_list = virus_list->nextVirus;
+void free_virus_data(void * data){
+  Virus * vir = (Virus *) data;
+  free(vir->VirusName);
+  free(vir->Sig);
+  free(vir);
+  
+}
 
-    // Free virus content
-    free(temp->vir->VirusName);
-    free(temp->vir->Sig);
-    free(temp->vir);
+void free_detection_data(void * data){
+  // Detection has no inside data which needs to be freed just itself.
+  free(data);
+}
+
+void list_free(link *list_ptr) {
+  while (list_ptr != NULL) {
+    link *temp = list_ptr;
+    list_ptr = list_ptr->next;
+    
+    // Free nodes data.
+    temp->freeData(temp->data);
+    
+    // Free actual node. 
     free(temp);
   }
 }
 
-/**
- * Scans a memory buffer for known virus signatures.
- * If found, prints their starting location and metadata.
- */
+
+
 void detectVirus() {
+  /**
+  * Scans a memory buffer for known virus signatures.
+  * If found, prints their starting location and metadata.
+  */
   if (globalVirusList == NULL) {
     fprintf(stderr, "You need to provide signature virus file first\n");
     return;
   }
+  
   char *buffer = calloc(BUFFER_SIZE, sizeof(char));
   if (!buffer) {
     perror("Memory allocation failed\n");
     return;
   }
-  printf("Please enter file name to scan:\n");
-  char filename[100];
-  readLine(filename, sizeof(filename));
-  size_t bytesRead = readFromFile(filename, buffer);
+
+  size_t bytesRead = readFromFile(infectedFile, buffer);
   if (bytesRead == 0) {
     fprintf(stderr, "Error reading from file");
     free(buffer);
@@ -341,55 +372,52 @@ void detectVirus() {
 
 void detect_virus(char *buffer, unsigned int size, link *virus_list) {
   int count = 0;
-  Detection *detections = scan_for_viruses(buffer, size, virus_list, &count);
-  Detection *nextDetection = detections;
+   
+  link *detections_head = scan_for_viruses(buffer, size, virus_list, &count);
+  link *curr_detection_ptr= detections_head;
   for (int i = 0; i < count; i++) {
-    printf("Starting byte: %d\n", nextDetection->offset);
-    printf("Virus name: %s\n", nextDetection->virus->VirusName);
-    printf("Signature size: %hu\n", nextDetection->virus->SigSize);
-    nextDetection = nextDetection->nextDetection;
+    Detection *currData = (Detection *) curr_detection_ptr->data;
+    printf("Starting byte: %d\n", currData->offset);
+    printf("Virus name: %s\n", currData->virus->VirusName);
+    printf("Signature size: %hu\n", currData->virus->SigSize);
+    curr_detection_ptr = curr_detection_ptr->next;
   }
-  freeDetections(detections);
+  
+  list_free(detections_head);
 }
 
 // Helper function: recieves buffer (file data), size to scan, virus_list &
 // changes numDetections to number of Viruses found. returns Detections*, list
 // of viruses with offsets detected in the buffer.
-Detection *scan_for_viruses(char *buffer, unsigned int size, link *virus_list,
+link *scan_for_viruses(char *buffer, unsigned int size, link *virus_list,
                             int *numDetections) {
   int count = 0;
-  Detection *detections = NULL;
-  Detection *lastDetection = NULL;
+  link *detections = NULL;
+//  Detection *lastDetection = NULL;
 
   link *tmp_virus_list;
+  
   for (int i = 0; i < size; i++) {
     tmp_virus_list = virus_list;
+
+    // Iterating over virus list to check for a match of virus signature.  
     while (tmp_virus_list != NULL) {
-      Virus *virus = tmp_virus_list->vir;
+      Virus *virus = (Virus *)tmp_virus_list->data;
       if (virus != NULL &&
           memcmp(&buffer[i], virus->Sig, virus->SigSize) == 0) {
         
-          Detection *newNode = (Detection*) malloc(sizeof(Detection));
-          if (newNode == NULL) {
+          Detection *newDetection = (Detection*) malloc(sizeof(Detection));
+          if (newDetection== NULL) {
             perror("Memory allocation failed");
-            exit(EXIT_FAILURE);
+            exit(EXIT_FAILURE); // ?? TOMER WHY IS THIS HERE ??  - This can cause a memory leak....
           }
-          newNode->offset = i;
-          newNode->virus = virus;
-          newNode->nextDetection = NULL;
+          newDetection->offset = i;
+          newDetection->virus = virus;
+          detections = list_append(detections, newDetection, &free_detection_data);
 
-          // list is empty
-          if (detections == NULL) {
-            detections = newNode;
-          }
-          // list not empty; Append at the end
-          else {
-            lastDetection->nextDetection = newNode;
-          }
-          lastDetection = newNode;
           count++;
       }
-    tmp_virus_list = tmp_virus_list->nextVirus;
+      tmp_virus_list = tmp_virus_list->next;
     }
   }
   *numDetections = count;
@@ -425,10 +453,8 @@ void neutralizeVirus() {
     perror("Memory allocation failed\n");
     return;
   }
-  printf("Please enter file name to fix:\n");
-  char filename[100];
-  readLine(filename, sizeof(filename));
-  size_t bytesRead = readFromFile(filename, buffer);
+
+  size_t bytesRead = readFromFile(infectedFile, buffer);
   if (bytesRead == 0) {
     fprintf(stderr, "Error reading from file");
     free(buffer);
@@ -436,15 +462,14 @@ void neutralizeVirus() {
   }
 
   int count = 0;
-  Detection *detections =
-      scan_for_viruses(buffer, bytesRead, globalVirusList, &count);
-      Detection *nextDetection = detections;
+  link *detections = scan_for_viruses(buffer, bytesRead, globalVirusList, &count);
+  link *nextDetection = detections;
   for (int i = 0; i < count; i++) {
-    neutralize_virus(filename, nextDetection->offset);
-    nextDetection = nextDetection->nextDetection; 
+    neutralize_virus(infectedFile, ((Detection *) nextDetection->data)->offset);
+    nextDetection = nextDetection->next; 
   }
 
-  freeDetections(detections);
+  list_free(detections);
   free(buffer);
 }
 
@@ -474,19 +499,6 @@ void neutralize_virus(char *fileName, int signatureOffset) {
 void readLine(char *buffer, int size) {
   fgets(buffer, size, stdin);
   buffer[strcspn(buffer, "\n")] = '\0';
-}
-
-
-/**
- * frees up all detections memory (not viruses).
- */
-void freeDetections(Detection *detections) {
-  Detection *nextDetection;
-  while (detections != NULL) {
-    nextDetection = detections->nextDetection;
-    free(detections);
-    detections = nextDetection;
-  }
 }
 
 /**
